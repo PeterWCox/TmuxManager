@@ -4,6 +4,24 @@ set -euo pipefail
 DEV_DIR="${TMUX_MANAGER_DEV_DIR:-$HOME/dev}"
 EDITOR_CMD="${EDITOR:-vi}"
 
+if [[ -t 1 ]]; then
+  BOLD="$(tput bold 2>/dev/null || true)"
+  DIM="$(tput dim 2>/dev/null || true)"
+  REVERSE="$(tput rev 2>/dev/null || true)"
+  GREEN="$(tput setaf 2 2>/dev/null || true)"
+  RED="$(tput setaf 1 2>/dev/null || true)"
+  CYAN="$(tput setaf 6 2>/dev/null || true)"
+  RESET="$(tput sgr0 2>/dev/null || true)"
+else
+  BOLD=""
+  DIM=""
+  REVERSE=""
+  GREEN=""
+  RED=""
+  CYAN=""
+  RESET=""
+fi
+
 die() {
   echo "tmuxmanager: $*" >&2
   exit 1
@@ -64,9 +82,9 @@ script_label() {
 status_icon() {
   local session="$1"
   if is_session_running "$session"; then
-    printf '●'
+    printf '%s●%s' "$GREEN" "$RESET"
   else
-    printf '○'
+    printf '%s●%s' "$RED" "$RESET"
   fi
 }
 
@@ -194,6 +212,133 @@ script_by_index() {
   discover_scripts | sed -n "${index}p"
 }
 
+read_key() {
+  local key rest
+  IFS= read -rsn1 key
+  if [[ "$key" == $'\e' ]]; then
+    IFS= read -rsn2 -t 1 rest || true
+    key+="$rest"
+  fi
+  printf '%s' "$key"
+}
+
+pick_index() {
+  local title="$1"
+  local footer="$2"
+  shift 2
+  local rows=("$@")
+  local selected=0
+  local key count
+
+  count="${#rows[@]}"
+  (( count > 0 )) || return 1
+
+  while true; do
+    clear >&2 2>/dev/null || true
+    printf '%s%s%s\n\n' "$BOLD" "$title" "$RESET" >&2
+    for i in "${!rows[@]}"; do
+      if (( i == selected )); then
+        printf '%s❯ %s%s\n' "$REVERSE" "${rows[$i]}" "$RESET" >&2
+      else
+        printf '  %s\n' "${rows[$i]}" >&2
+      fi
+    done
+    printf '\n%s%s%s\n' "$DIM" "$footer" "$RESET" >&2
+
+    key="$(read_key)"
+    case "$key" in
+      $'\e[A'|k)
+        if (( selected == 0 )); then
+          selected=$((count - 1))
+        else
+          selected=$((selected - 1))
+        fi
+        ;;
+      $'\e[B'|j)
+        selected=$(((selected + 1) % count))
+        ;;
+      "")
+        printf '%s\n' "$selected"
+        return 0
+        ;;
+      /)
+        printf '__grep_all__\n'
+        return 0
+        ;;
+      r)
+        printf '__refresh__\n'
+        return 0
+        ;;
+      q|$'\e')
+        return 1
+        ;;
+    esac
+  done
+}
+
+pick_session_script() {
+  local scripts=()
+  local rows=()
+  local script session status icon selected
+
+  while IFS= read -r script; do
+    scripts+=("$script")
+  done < <(discover_scripts)
+
+  ((${#scripts[@]} > 0)) || die "no tmux scripts found under $DEV_DIR"
+
+  for script in "${scripts[@]}"; do
+    session="$(session_from_script "$script")"
+    status="$(status_text "$session")"
+    icon="$(status_icon "$session")"
+    rows+=("$(printf '%s %-8s %-24s %s' "$icon" "$status" "$session" "${script#$DEV_DIR/}")")
+  done
+
+  selected="$(pick_index "TmuxManager" "↑/↓ move  Enter select  / grep all  r refresh  q quit" "${rows[@]}")" || return 1
+  if [[ "$selected" == "__grep_all__" || "$selected" == "__refresh__" ]]; then
+    printf '%s\n' "$selected"
+    return 0
+  fi
+  printf '%s\n' "${scripts[$selected]}"
+}
+
+pick_action() {
+  local session="$1"
+  local actions=()
+  local rows=()
+  local selected action
+
+  actions=("grep" "logs" "attach")
+  if is_session_running "$session"; then
+    actions+=("stop" "restart")
+  else
+    actions+=("start")
+  fi
+  actions+=("back")
+
+  for action in "${actions[@]}"; do
+    case "$action" in
+      grep) rows+=("Grep this session") ;;
+      logs) rows+=("Show logs") ;;
+      attach) rows+=("Attach") ;;
+      stop) rows+=("${RED}Stop${RESET}") ;;
+      restart) rows+=("Restart") ;;
+      start) rows+=("${GREEN}Start${RESET}") ;;
+      back) rows+=("Back") ;;
+    esac
+  done
+
+  selected="$(pick_index "$session" "↑/↓ move  Enter select  q back" "${rows[@]}")" || {
+    printf 'back\n'
+    return 0
+  }
+  if [[ "$selected" == "__grep_all__" || "$selected" == "__refresh__" ]]; then
+    printf 'back\n'
+    return 0
+  fi
+  printf '%s\n' "${actions[$selected]}"
+}
+
 start_script() {
   local script="$1"
   [[ -x "$script" ]] || chmod +x "$script"
@@ -266,96 +411,65 @@ interactive() {
   need_cmd tmux
 
   while true; do
-    local count choice script session action pattern
+    local script session action pattern key
 
-    clear 2>/dev/null || true
-    echo "TmuxManager"
-    echo
-    list_picker_rows
-    echo
-    echo "● running   ○ stopped"
-    echo
-    printf 'Select session number, / to grep all, r to refresh, q to quit> '
-    read -r choice
+    script="$(pick_session_script)" || exit 0
+    if [[ "$script" == "__refresh__" ]]; then
+      continue
+    fi
 
-    case "$choice" in
-      q|quit|exit) exit 0 ;;
-      r|"") continue ;;
-      /)
-        printf 'grep all pattern> '
+    if [[ "$script" == "__grep_all__" ]]; then
+      clear 2>/dev/null || true
+      printf '%sGrep all sessions%s\n\n' "$BOLD" "$RESET"
+      printf 'pattern> '
+      read -r pattern
+      grep_sessions "$pattern" || true
+      printf '\npress enter to continue> '
+      read -r _
+      continue
+    fi
+
+    session="$(session_from_script "$script")"
+    action="$(pick_action "$session")"
+
+    case "$action" in
+      grep)
+        clear 2>/dev/null || true
+        printf '%sGrep %s%s\n\n' "$BOLD" "$session" "$RESET"
+        printf 'pattern> '
         read -r pattern
-        grep_sessions "$pattern" || true
+        grep_session "$session" "$pattern" || true
         printf '\npress enter to continue> '
         read -r _
         ;;
-      ''|*[!0-9]*)
-        echo "Unknown choice: $choice"
-        sleep 1
-        ;;
-      *)
-        count="$(discover_scripts | wc -l | tr -d ' ')"
-        if (( choice < 1 || choice > count )); then
-          echo "Choice out of range: $choice"
-          sleep 1
-          continue
-        fi
-
-        script="$(script_by_index "$choice")"
-        session="$(session_from_script "$script")"
-
+      logs)
         clear 2>/dev/null || true
-        printf '%s %s %s\n' "$(status_icon "$session")" "$session" "${script#$DEV_DIR/}"
-        echo
-        echo "1) Grep this session"
-        echo "2) Show logs"
-        echo "3) Attach"
-        if is_session_running "$session"; then
-          echo "4) Stop"
-          echo "5) Restart"
-        else
-          echo "4) Start"
-        fi
-        echo "b) Back"
-        echo
-        printf 'action> '
-        read -r action
-
-        case "$action" in
-          1|g|grep)
-            printf 'pattern> '
-            read -r pattern
-            grep_session "$session" "$pattern" || true
-            printf '\npress enter to continue> '
-            read -r _
-            ;;
-          2|l|logs)
-            capture_session "$session"
-            printf '\npress enter to continue> '
-            read -r _
-            ;;
-          3|a|attach)
-            tmux attach -t "$session"
-            ;;
-          4)
-            if is_session_running "$session"; then
-              stop_session "$session"
-            else
-              start_script "$script"
-            fi
-            printf '\npress enter to continue> '
-            read -r _
-            ;;
-          5)
-            if is_session_running "$session"; then
-              restart_script "$script"
-              printf '\npress enter to continue> '
-              read -r _
-            fi
-            ;;
-          b|back|"") ;;
-          *) echo "Unknown action: $action"; sleep 1 ;;
-        esac
+        capture_session "$session"
+        printf '\npress enter to continue> '
+        read -r _
         ;;
+      attach)
+        tmux attach -t "$session"
+        ;;
+      stop)
+        clear 2>/dev/null || true
+        stop_session "$session"
+        printf '\npress enter to continue> '
+        read -r _
+        ;;
+      restart)
+        clear 2>/dev/null || true
+        restart_script "$script"
+        printf '\npress enter to continue> '
+        read -r _
+        ;;
+      start)
+        clear 2>/dev/null || true
+        start_script "$script"
+        printf '\npress enter to continue> '
+        read -r _
+        ;;
+      back) ;;
     esac
   done
 }

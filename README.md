@@ -34,15 +34,15 @@ Add that alias to `~/.zshrc` to launch the manager with `q`.
 ./tmuxmanager grep "error"
 ```
 
-The default interactive view is a session picker:
+The default interactive view is an arrow-key picker. Running sessions show a green dot; stopped sessions show a red dot.
 
 ```text
 TmuxManager
 
- 1) ● running  budget-dev       Budget/tmux-dev.sh
- 2) ○ stopped  sidequest-dev    SideQuest/tmux-dev.sh
+❯ ● running  budget-dev       Budget/tmux-dev.sh
+  ● stopped  sidequest-dev    SideQuest/tmux-dev.sh
 
-● running   ○ stopped
+↑/↓ move  Enter select  / grep all  r refresh  q quit
 ```
 
 Set a different scan root with:
