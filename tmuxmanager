@@ -1,0 +1,301 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+DEV_DIR="${TMUX_MANAGER_DEV_DIR:-$HOME/dev}"
+EDITOR_CMD="${EDITOR:-vi}"
+
+die() {
+  echo "tmuxmanager: $*" >&2
+  exit 1
+}
+
+need_cmd() {
+  command -v "$1" >/dev/null 2>&1 || die "$1 is required"
+}
+
+usage() {
+  cat <<'EOF'
+TmuxManager
+
+Usage:
+  tmuxmanager                 Open the interactive manager
+  tmuxmanager list            List discovered tmux scripts
+  tmuxmanager sessions        List running tmux sessions
+  tmuxmanager start [query]   Start a discovered script
+  tmuxmanager stop [query]    Stop the inferred or selected session
+  tmuxmanager restart [query] Restart the inferred or selected session
+  tmuxmanager attach [query]  Attach to a running session
+  tmuxmanager logs [query]    Show captured pane output for a session
+  tmuxmanager grep PATTERN    Search captured pane output across sessions
+  tmuxmanager edit [query]    Open a discovered script in $EDITOR
+
+Environment:
+  TMUX_MANAGER_DEV_DIR        Directory to scan, default: ~/dev
+EOF
+}
+
+discover_scripts() {
+  [[ -d "$DEV_DIR" ]] || die "dev directory not found: $DEV_DIR"
+
+  find "$DEV_DIR" \
+    \( -path '*/.git' -o -path '*/node_modules' -o -path '*/bin' -o -path '*/obj' \) -prune \
+    -o -type f -name '*tmux*.sh' -print 2>/dev/null |
+    while IFS= read -r file; do
+      if [[ "$(basename "$file")" == "tmuxmanager" ]]; then
+        continue
+      fi
+
+      if [[ -x "$file" ]] || head -n 1 "$file" 2>/dev/null | grep -qE '^#!'; then
+        if grep -qE '(^|[^[:alnum:]_])tmux([^[:alnum:]_]|$)' "$file" 2>/dev/null || [[ "$(basename "$file")" == *tmux* ]]; then
+          printf '%s\n' "$file"
+        fi
+      fi
+    done |
+    sort
+}
+
+script_label() {
+  local script="$1"
+  local project
+  project="$(basename "$(dirname "$script")")"
+  printf '%s  (%s)' "$project" "${script#$DEV_DIR/}"
+}
+
+session_from_script() {
+  local script="$1"
+  local session
+
+  session="$(
+    grep -E '^[[:space:]]*SESSION=' "$script" 2>/dev/null |
+      head -n 1 |
+      sed -E 's/^[[:space:]]*SESSION="\$\{[^:}]+:-([^}]+)\}".*/\1/; s/^[[:space:]]*SESSION="?([^"]+)"?.*/\1/' || true
+  )"
+
+  if [[ -n "$session" && "$session" != *'$'* && "$session" != *'{'* ]]; then
+    printf '%s\n' "$session"
+    return
+  fi
+
+  printf '%s-dev\n' "$(basename "$(dirname "$script")" | tr '[:upper:] _' '[:lower:]-')"
+}
+
+tmux_sessions() {
+  tmux list-sessions -F '#S' 2>/dev/null || true
+}
+
+is_session_running() {
+  local session="$1"
+  tmux has-session -t "$session" 2>/dev/null
+}
+
+pick_from_lines() {
+  local prompt="$1"
+  local lines="$2"
+  local count choice
+
+  [[ -n "$lines" ]] || return 1
+
+  if command -v fzf >/dev/null 2>&1; then
+    printf '%s\n' "$lines" | fzf --prompt="$prompt"
+    return
+  fi
+
+  count="$(printf '%s\n' "$lines" | sed '/^$/d' | wc -l | tr -d ' ')"
+  if [[ "$count" == "1" ]]; then
+    printf '%s\n' "$lines"
+    return
+  fi
+
+  printf '%s\n' "$lines" | nl -w 2 -s ') '
+  printf '%s ' "$prompt" >&2
+  read -r choice
+  [[ "$choice" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$lines" | sed -n "${choice}p"
+}
+
+select_script() {
+  local query="${1:-}"
+  local scripts matches selected
+  scripts="$(discover_scripts)"
+  [[ -n "$scripts" ]] || die "no tmux scripts found under $DEV_DIR"
+
+  if [[ -n "$query" ]]; then
+    matches="$(printf '%s\n' "$scripts" | grep -i -- "$query" || true)"
+  else
+    matches="$scripts"
+  fi
+
+  [[ -n "$matches" ]] || die "no tmux script matched: $query"
+
+  selected="$(pick_from_lines "script> " "$matches")" || die "no script selected"
+  printf '%s\n' "$selected"
+}
+
+select_session() {
+  local query="${1:-}"
+  local sessions matches selected
+  sessions="$(tmux_sessions)"
+  [[ -n "$sessions" ]] || die "no tmux sessions are running"
+
+  if [[ -n "$query" ]]; then
+    matches="$(printf '%s\n' "$sessions" | grep -i -- "$query" || true)"
+  else
+    matches="$sessions"
+  fi
+
+  [[ -n "$matches" ]] || die "no tmux session matched: $query"
+
+  selected="$(pick_from_lines "session> " "$matches")" || die "no session selected"
+  printf '%s\n' "$selected"
+}
+
+list_scripts() {
+  local script session status
+  discover_scripts | while IFS= read -r script; do
+    session="$(session_from_script "$script")"
+    status="stopped"
+    if is_session_running "$session"; then
+      status="running"
+    fi
+    printf '%-12s %-24s %s\n' "$status" "$session" "${script#$DEV_DIR/}"
+  done
+}
+
+start_script() {
+  local script="$1"
+  [[ -x "$script" ]] || chmod +x "$script"
+  "$script" --no-attach
+}
+
+stop_session() {
+  local session="$1"
+  if is_session_running "$session"; then
+    tmux kill-session -t "$session"
+    echo "Stopped $session"
+  else
+    echo "$session is not running"
+  fi
+}
+
+restart_script() {
+  local script="$1"
+  local session
+  session="$(session_from_script "$script")"
+  stop_session "$session"
+  start_script "$script"
+}
+
+capture_session() {
+  local session="$1"
+  local target
+  tmux list-panes -a -F '#S:#I.#P' 2>/dev/null |
+    awk -F: -v s="$session" '$1 == s { print }' |
+    while IFS= read -r target; do
+      printf '\n===== %s =====\n' "$target"
+      tmux capture-pane -p -S - -t "$target" 2>/dev/null || true
+    done
+}
+
+grep_sessions() {
+  local pattern="$1"
+  local session target
+  [[ -n "$pattern" ]] || die "grep requires a pattern"
+
+  tmux list-panes -a -F '#S:#I.#P' 2>/dev/null |
+    while IFS=: read -r session target; do
+      tmux capture-pane -p -S - -t "$session:$target" 2>/dev/null |
+        grep -in -- "$pattern" |
+        sed "s|^|$session:$target:|"
+    done
+}
+
+interactive() {
+  need_cmd tmux
+
+  while true; do
+    cat <<EOF
+
+TmuxManager
+1) List tmux scripts
+2) Start script
+3) Stop session
+4) Restart script
+5) Attach to session
+6) Show session logs
+7) Grep all sessions
+8) Edit script
+9) Quit
+EOF
+    printf 'choice> '
+    read -r choice
+    case "$choice" in
+      1) list_scripts ;;
+      2) start_script "$(select_script)" ;;
+      3) stop_session "$(select_session)" ;;
+      4) restart_script "$(select_script)" ;;
+      5) tmux attach -t "$(select_session)" ;;
+      6) capture_session "$(select_session)" ;;
+      7) printf 'pattern> '; read -r pattern; grep_sessions "$pattern" ;;
+      8) "$EDITOR_CMD" "$(select_script)" ;;
+      9|q|quit|exit) exit 0 ;;
+      *) echo "Unknown choice: $choice" ;;
+    esac
+  done
+}
+
+main() {
+  local command="${1:-}"
+  local script session
+
+  case "$command" in
+    "" ) interactive ;;
+    -h|--help|help) usage ;;
+    list) list_scripts ;;
+    sessions) tmux_sessions ;;
+    start)
+      need_cmd tmux
+      script="$(select_script "${2:-}")"
+      start_script "$script"
+      ;;
+    stop)
+      need_cmd tmux
+      if [[ -n "${2:-}" ]]; then
+        script="$(select_script "$2" 2>/dev/null || true)"
+        if [[ -n "$script" ]]; then
+          session="$(session_from_script "$script")"
+        else
+          session="$(select_session "$2")"
+        fi
+      else
+        session="$(select_session)"
+      fi
+      stop_session "$session"
+      ;;
+    restart)
+      need_cmd tmux
+      script="$(select_script "${2:-}")"
+      restart_script "$script"
+      ;;
+    attach)
+      need_cmd tmux
+      tmux attach -t "$(select_session "${2:-}")"
+      ;;
+    logs)
+      need_cmd tmux
+      capture_session "$(select_session "${2:-}")"
+      ;;
+    grep)
+      need_cmd tmux
+      grep_sessions "${2:-}"
+      ;;
+    edit)
+      "$EDITOR_CMD" "$(select_script "${2:-}")"
+      ;;
+    *)
+      usage
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
