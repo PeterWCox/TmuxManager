@@ -18,7 +18,7 @@ usage() {
 TmuxManager
 
 Usage:
-  tmuxmanager                 Open the interactive manager
+  tmuxmanager                 Open the interactive session list
   tmuxmanager list            List discovered tmux scripts
   tmuxmanager sessions        List running tmux sessions
   tmuxmanager start [query]   Start a discovered script
@@ -59,6 +59,24 @@ script_label() {
   local project
   project="$(basename "$(dirname "$script")")"
   printf '%s  (%s)' "$project" "${script#$DEV_DIR/}"
+}
+
+status_icon() {
+  local session="$1"
+  if is_session_running "$session"; then
+    printf '●'
+  else
+    printf '○'
+  fi
+}
+
+status_text() {
+  local session="$1"
+  if is_session_running "$session"; then
+    printf 'running'
+  else
+    printf 'stopped'
+  fi
 }
 
 session_from_script() {
@@ -150,15 +168,30 @@ select_session() {
 }
 
 list_scripts() {
-  local script session status
+  local script session status icon
   discover_scripts | while IFS= read -r script; do
     session="$(session_from_script "$script")"
-    status="stopped"
-    if is_session_running "$session"; then
-      status="running"
-    fi
-    printf '%-12s %-24s %s\n' "$status" "$session" "${script#$DEV_DIR/}"
+    status="$(status_text "$session")"
+    icon="$(status_icon "$session")"
+    printf '%s %-8s %-24s %s\n' "$icon" "$status" "$session" "${script#$DEV_DIR/}"
   done
+}
+
+list_picker_rows() {
+  local index=1
+  local script session status icon
+  discover_scripts | while IFS= read -r script; do
+    session="$(session_from_script "$script")"
+    status="$(status_text "$session")"
+    icon="$(status_icon "$session")"
+    printf '%2d) %s %-8s %-24s %s\n' "$index" "$icon" "$status" "$session" "${script#$DEV_DIR/}"
+    index=$((index + 1))
+  done
+}
+
+script_by_index() {
+  local index="$1"
+  discover_scripts | sed -n "${index}p"
 }
 
 start_script() {
@@ -209,36 +242,120 @@ grep_sessions() {
     done
 }
 
+grep_session() {
+  local session="$1"
+  local pattern="$2"
+  local target
+  [[ -n "$pattern" ]] || die "grep requires a pattern"
+
+  if ! is_session_running "$session"; then
+    echo "$session is not running"
+    return 1
+  fi
+
+  tmux list-panes -a -F '#S:#I.#P' 2>/dev/null |
+    awk -F: -v s="$session" '$1 == s { print }' |
+    while IFS= read -r target; do
+      tmux capture-pane -p -S - -t "$target" 2>/dev/null |
+        grep -in -- "$pattern" |
+        sed "s|^|$target:|"
+    done
+}
+
 interactive() {
   need_cmd tmux
 
   while true; do
-    cat <<EOF
+    local count choice script session action pattern
 
-TmuxManager
-1) List tmux scripts
-2) Start script
-3) Stop session
-4) Restart script
-5) Attach to session
-6) Show session logs
-7) Grep all sessions
-8) Edit script
-9) Quit
-EOF
-    printf 'choice> '
+    clear 2>/dev/null || true
+    echo "TmuxManager"
+    echo
+    list_picker_rows
+    echo
+    echo "● running   ○ stopped"
+    echo
+    printf 'Select session number, / to grep all, r to refresh, q to quit> '
     read -r choice
+
     case "$choice" in
-      1) list_scripts ;;
-      2) start_script "$(select_script)" ;;
-      3) stop_session "$(select_session)" ;;
-      4) restart_script "$(select_script)" ;;
-      5) tmux attach -t "$(select_session)" ;;
-      6) capture_session "$(select_session)" ;;
-      7) printf 'pattern> '; read -r pattern; grep_sessions "$pattern" ;;
-      8) "$EDITOR_CMD" "$(select_script)" ;;
-      9|q|quit|exit) exit 0 ;;
-      *) echo "Unknown choice: $choice" ;;
+      q|quit|exit) exit 0 ;;
+      r|"") continue ;;
+      /)
+        printf 'grep all pattern> '
+        read -r pattern
+        grep_sessions "$pattern" || true
+        printf '\npress enter to continue> '
+        read -r _
+        ;;
+      ''|*[!0-9]*)
+        echo "Unknown choice: $choice"
+        sleep 1
+        ;;
+      *)
+        count="$(discover_scripts | wc -l | tr -d ' ')"
+        if (( choice < 1 || choice > count )); then
+          echo "Choice out of range: $choice"
+          sleep 1
+          continue
+        fi
+
+        script="$(script_by_index "$choice")"
+        session="$(session_from_script "$script")"
+
+        clear 2>/dev/null || true
+        printf '%s %s %s\n' "$(status_icon "$session")" "$session" "${script#$DEV_DIR/}"
+        echo
+        echo "1) Grep this session"
+        echo "2) Show logs"
+        echo "3) Attach"
+        if is_session_running "$session"; then
+          echo "4) Stop"
+          echo "5) Restart"
+        else
+          echo "4) Start"
+        fi
+        echo "b) Back"
+        echo
+        printf 'action> '
+        read -r action
+
+        case "$action" in
+          1|g|grep)
+            printf 'pattern> '
+            read -r pattern
+            grep_session "$session" "$pattern" || true
+            printf '\npress enter to continue> '
+            read -r _
+            ;;
+          2|l|logs)
+            capture_session "$session"
+            printf '\npress enter to continue> '
+            read -r _
+            ;;
+          3|a|attach)
+            tmux attach -t "$session"
+            ;;
+          4)
+            if is_session_running "$session"; then
+              stop_session "$session"
+            else
+              start_script "$script"
+            fi
+            printf '\npress enter to continue> '
+            read -r _
+            ;;
+          5)
+            if is_session_running "$session"; then
+              restart_script "$script"
+              printf '\npress enter to continue> '
+              read -r _
+            fi
+            ;;
+          b|back|"") ;;
+          *) echo "Unknown action: $action"; sleep 1 ;;
+        esac
+        ;;
     esac
   done
 }
@@ -286,7 +403,17 @@ main() {
       ;;
     grep)
       need_cmd tmux
-      grep_sessions "${2:-}"
+      if [[ -n "${3:-}" ]]; then
+        script="$(select_script "$2" 2>/dev/null || true)"
+        if [[ -n "$script" ]]; then
+          session="$(session_from_script "$script")"
+        else
+          session="$(select_session "$2")"
+        fi
+        grep_session "$session" "$3"
+      else
+        grep_sessions "${2:-}"
+      fi
       ;;
     edit)
       "$EDITOR_CMD" "$(select_script "${2:-}")"

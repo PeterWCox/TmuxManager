@@ -1,8 +1,8 @@
 # TmuxManager
 
-TmuxManager is an interactive CLI for finding and managing tmux project scripts under `~/dev`.
+TmuxManager is an interactive CLI for finding and inspecting tmux project scripts under `~/dev`.
 
-It recursively scans the dev folder for tmux-related scripts, shows whether their inferred session is running, and lets you start, stop, restart, attach, inspect logs, or grep captured pane output.
+It recursively scans the dev folder for tmux-related scripts, shows whether their inferred session is running, and lets you select one to grep captured pane output, show logs, attach, start, stop, or restart.
 
 ## Install
 
@@ -15,22 +15,34 @@ chmod +x tmuxmanager
 Optional shell convenience:
 
 ```bash
-ln -s "$PWD/tmuxmanager" /usr/local/bin/tmuxmanager
+alias q="$PWD/tmuxmanager"
 ```
 
-If `/usr/local/bin` is not writable or not on your `PATH`, use any directory that is.
+Add that alias to `~/.zshrc` to launch the manager with `q`.
 
 ## Usage
 
 ```bash
 ./tmuxmanager
 ./tmuxmanager list
+./tmuxmanager grep budget "error"
 ./tmuxmanager start budget
 ./tmuxmanager stop budget
 ./tmuxmanager restart sidequest
 ./tmuxmanager attach budget
 ./tmuxmanager logs budget
 ./tmuxmanager grep "error"
+```
+
+The default interactive view is a session picker:
+
+```text
+TmuxManager
+
+ 1) ● running  budget-dev       Budget/tmux-dev.sh
+ 2) ○ stopped  sidequest-dev    SideQuest/tmux-dev.sh
+
+● running   ○ stopped
 ```
 
 Set a different scan root with:
