@@ -3,6 +3,7 @@ set -euo pipefail
 
 DEV_DIR="${TMUX_MANAGER_DEV_DIR:-$HOME/dev}"
 EDITOR_CMD="${EDITOR:-vi}"
+GHOSTTY_APP="${TMUX_MANAGER_GHOSTTY_APP:-/Applications/Ghostty.app}"
 
 if [[ -t 1 ]]; then
   BOLD="$(tput bold 2>/dev/null || true)"
@@ -49,6 +50,8 @@ Usage:
 
 Environment:
   TMUX_MANAGER_DEV_DIR        Directory to scan, default: ~/dev
+  TMUX_MANAGER_GHOSTTY_APP    Ghostty app path, default: /Applications/Ghostty.app
+  TMUX_MANAGER_GHOSTTY        Set to 0 to attach in the current terminal
 EOF
 }
 
@@ -345,6 +348,27 @@ start_script() {
   "$script" --no-attach
 }
 
+open_session() {
+  local session="$1"
+  local attach_command
+
+  if [[ "${TMUX_MANAGER_GHOSTTY:-1}" != "0" && -d "$GHOSTTY_APP" ]]; then
+    printf -v attach_command 'tmux attach -t %q' "$session"
+    open -na "$GHOSTTY_APP" --args -e /bin/zsh -lc "$attach_command"
+    return
+  fi
+
+  tmux attach -t "$session"
+}
+
+start_script_and_open() {
+  local script="$1"
+  local session
+  session="$(session_from_script "$script")"
+  start_script "$script"
+  open_session "$session"
+}
+
 stop_session() {
   local session="$1"
   if is_session_running "$session"; then
@@ -449,7 +473,7 @@ interactive() {
         read -r _
         ;;
       attach)
-        tmux attach -t "$session"
+        open_session "$session"
         ;;
       stop)
         clear 2>/dev/null || true
@@ -460,12 +484,13 @@ interactive() {
       restart)
         clear 2>/dev/null || true
         restart_script "$script"
+        open_session "$session"
         printf '\npress enter to continue> '
         read -r _
         ;;
       start)
         clear 2>/dev/null || true
-        start_script "$script"
+        start_script_and_open "$script"
         printf '\npress enter to continue> '
         read -r _
         ;;
@@ -486,7 +511,7 @@ main() {
     start)
       need_cmd tmux
       script="$(select_script "${2:-}")"
-      start_script "$script"
+      start_script_and_open "$script"
       ;;
     stop)
       need_cmd tmux
@@ -506,10 +531,11 @@ main() {
       need_cmd tmux
       script="$(select_script "${2:-}")"
       restart_script "$script"
+      open_session "$(session_from_script "$script")"
       ;;
     attach)
       need_cmd tmux
-      tmux attach -t "$(select_session "${2:-}")"
+      open_session "$(select_session "${2:-}")"
       ;;
     logs)
       need_cmd tmux

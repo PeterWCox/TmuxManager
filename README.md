@@ -4,6 +4,8 @@ TmuxManager is an interactive CLI for finding and inspecting tmux project script
 
 It recursively scans the dev folder for tmux-related scripts, shows whether their inferred session is running, and lets you select one to grep captured pane output, show logs, attach, start, stop, or restart.
 
+Starting, restarting, or attaching opens the tmux session in a new Ghostty window by default.
+
 ## Install
 
 ```bash
@@ -49,6 +51,12 @@ Set a different scan root with:
 
 ```bash
 TMUX_MANAGER_DEV_DIR=/path/to/dev ./tmuxmanager
+```
+
+Attach in the current terminal instead of Ghostty with:
+
+```bash
+TMUX_MANAGER_GHOSTTY=0 ./tmuxmanager
 ```
 
 ## Session Detection
