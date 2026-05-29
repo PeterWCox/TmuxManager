@@ -381,21 +381,54 @@ start_script() {
   "$script" --no-attach
 }
 
+focus_ghostty_tab() {
+  local tab_title="$1"
+
+  pgrep -x ghostty >/dev/null 2>&1 || return 1
+
+  osascript - "$tab_title" <<'APPLESCRIPT'
+on run argv
+  set tabTitle to item 1 of argv
+
+  tell application "System Events"
+    tell process "Ghostty"
+      repeat with menuItem in menu items of menu 1 of menu bar item "Window" of menu bar 1
+        try
+          set menuTitle to name of menuItem as text
+          ignoring case
+            if menuTitle is tabTitle or menuTitle contains tabTitle then
+              click menuItem
+              return "focused"
+            end if
+          end ignoring
+        end try
+      end repeat
+      error number -128
+    end tell
+  end tell
+end run
+APPLESCRIPT
+}
+
 open_command_in_ghostty() {
-  local command="$1"
+  local tab_title="$1"
+  local command="$2"
+  local titled_command
   local restore_clipboard
   if [[ ! -d "$GHOSTTY_APP" ]]; then
     echo "Ghostty app not found: $GHOSTTY_APP"
     return 1
   fi
 
+  printf -v titled_command 'printf "\\033]0;%s\\007"; exec /bin/zsh -lc %q' "$tab_title" "$command"
+
   if ! pgrep -x ghostty >/dev/null 2>&1; then
-    open -na "$GHOSTTY_APP" --args -e /bin/zsh -lc "$command" >/dev/null 2>&1
+    open -na "$GHOSTTY_APP" --args -e /bin/zsh -lc "$titled_command" >/dev/null 2>&1
     return
   fi
 
   restore_clipboard="$(pbpaste 2>/dev/null || true)"
-  osascript - "$command" "$restore_clipboard" <<'APPLESCRIPT'
+  osascript - "$titled_command" "$restore_clipboard" <<'APPLESCRIPT'
 on run argv
   set commandText to item 1 of argv
   set oldClipboard to item 2 of argv
@@ -418,16 +451,32 @@ open_session_in_ghostty() {
   local attach_command
 
   printf -v attach_command 'tmux attach -t %q' "$session"
-  open_command_in_ghostty "$attach_command"
+  if focus_ghostty_tab "$session" >/dev/null 2>&1; then
+    return
+  fi
+  if focus_ghostty_tab "$attach_command" >/dev/null 2>&1; then
+    return
+  fi
+
+  open_command_in_ghostty "$session" "$attach_command"
 }
 
 open_script_in_ghostty() {
   local script="$1"
+  local session
   local script_command
 
+  session="$(session_from_script "$script")"
   [[ -x "$script" ]] || chmod +x "$script"
   printf -v script_command '%q' "$script"
-  open_command_in_ghostty "$script_command"
+  if focus_ghostty_tab "$session" >/dev/null 2>&1; then
+    return
+  fi
+  if focus_ghostty_tab "$script" >/dev/null 2>&1; then
+    return
+  fi
+
+  open_command_in_ghostty "$session" "$script_command"
 }
 
 open_session() {
