@@ -381,31 +381,53 @@ start_script() {
   "$script" --no-attach
 }
 
-open_session_in_ghostty() {
-  local session="$1"
-  local attach_command
-
+open_command_in_ghostty() {
+  local command="$1"
+  local restore_clipboard
   if [[ ! -d "$GHOSTTY_APP" ]]; then
     echo "Ghostty app not found: $GHOSTTY_APP"
     return 1
   fi
 
+  if ! pgrep -x ghostty >/dev/null 2>&1; then
+    open -na "$GHOSTTY_APP" --args -e /bin/zsh -lc "$command" >/dev/null 2>&1
+    return
+  fi
+
+  restore_clipboard="$(pbpaste 2>/dev/null || true)"
+  osascript - "$command" "$restore_clipboard" <<'APPLESCRIPT'
+on run argv
+  set commandText to item 1 of argv
+  set oldClipboard to item 2 of argv
+
+  tell application "System Events"
+    keystroke "t" using command down
+    delay 0.15
+    set the clipboard to commandText
+    keystroke "v" using command down
+    key code 36
+    delay 0.05
+    set the clipboard to oldClipboard
+  end tell
+end run
+APPLESCRIPT
+}
+
+open_session_in_ghostty() {
+  local session="$1"
+  local attach_command
+
   printf -v attach_command 'tmux attach -t %q' "$session"
-  open -na "$GHOSTTY_APP" --args -e /bin/zsh -lc "$attach_command" >/dev/null 2>&1
+  open_command_in_ghostty "$attach_command"
 }
 
 open_script_in_ghostty() {
   local script="$1"
   local script_command
 
-  if [[ ! -d "$GHOSTTY_APP" ]]; then
-    echo "Ghostty app not found: $GHOSTTY_APP"
-    return 1
-  fi
-
   [[ -x "$script" ]] || chmod +x "$script"
   printf -v script_command '%q' "$script"
-  open -na "$GHOSTTY_APP" --args -e /bin/zsh -lc "$script_command" >/dev/null 2>&1
+  open_command_in_ghostty "$script_command"
 }
 
 open_session() {
