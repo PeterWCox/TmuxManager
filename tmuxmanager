@@ -10,6 +10,7 @@ if [[ -t 1 ]]; then
   DIM="$(tput dim 2>/dev/null || true)"
   REVERSE="$(tput rev 2>/dev/null || true)"
   GREEN="$(tput setaf 2 2>/dev/null || true)"
+  YELLOW="$(tput setaf 3 2>/dev/null || true)"
   RED="$(tput setaf 1 2>/dev/null || true)"
   CYAN="$(tput setaf 6 2>/dev/null || true)"
   RESET="$(tput sgr0 2>/dev/null || true)"
@@ -18,6 +19,7 @@ else
   DIM=""
   REVERSE=""
   GREEN=""
+  YELLOW=""
   RED=""
   CYAN=""
   RESET=""
@@ -82,22 +84,106 @@ script_label() {
   printf '%s  (%s)' "$project" "${script#$DEV_DIR/}"
 }
 
-status_icon() {
-  local session="$1"
-  if is_session_running "$session"; then
-    printf '%s●%s' "$GREEN" "$RESET"
-  else
-    printf '%s●%s' "$RED" "$RESET"
+project_dir_from_script() {
+  local script="$1"
+  dirname "$script"
+}
+
+git_summary() {
+  local script="$1"
+  local project_dir branch porcelain added removed untracked branch_cell add_cell remove_cell untracked_cell
+
+  project_dir="$(project_dir_from_script "$script")"
+  if ! git -C "$project_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    printf '%-32s' ''
+    return
   fi
+
+  branch="$(git -C "$project_dir" branch --show-current 2>/dev/null || true)"
+  if [[ -z "$branch" ]]; then
+    branch="$(git -C "$project_dir" rev-parse --short HEAD 2>/dev/null || true)"
+  fi
+
+  porcelain="$(git -C "$project_dir" status --porcelain 2>/dev/null || true)"
+  untracked="$(printf '%s\n' "$porcelain" | awk 'substr($0, 1, 2) == "??" { count++ } END { print count + 0 }')"
+  read -r added removed < <(
+    git -C "$project_dir" diff --numstat HEAD 2>/dev/null |
+      awk '
+        $1 ~ /^[0-9]+$/ { added += $1 }
+        $2 ~ /^[0-9]+$/ { removed += $2 }
+        END { print added + 0, removed + 0 }
+      '
+  )
+
+  printf -v branch_cell '%-15s' "${branch:0:15}"
+  printf -v add_cell '+%-5s' "$added"
+  printf -v remove_cell -- '-%-5s' "$removed"
+  printf -v untracked_cell '?%-3s' "$untracked"
+
+  printf '%s%s%s %s%s%s%s%s%s%s%s%s' \
+    "$CYAN" "$branch_cell" "$RESET" \
+    "$GREEN" "$add_cell" "$RESET" \
+    "$RED" "$remove_cell" "$RESET" \
+    "$YELLOW" "$untracked_cell" "$RESET"
+}
+
+warning_reason() {
+  local session="$1"
+  local target output
+
+  while IFS= read -r target; do
+    output="$(tmux capture-pane -p -S -80 -t "$target" 2>/dev/null || true)"
+    if printf '%s\n' "$output" | grep -Eiq '(^|[^[:alnum:]_])fatal([^[:alnum:]_]|$)'; then
+      printf 'fatal in %s' "$target"
+      return
+    fi
+    if printf '%s\n' "$output" | grep -Eiq 'eaddrinuse|address already in use'; then
+      printf 'port in use in %s' "$target"
+      return
+    fi
+    if printf '%s\n' "$output" | grep -Eiq '(^|[^[:alnum:]_])unhandled exception([^[:alnum:]_]|$)|(^|[^[:alnum:]_])uncaught exception([^[:alnum:]_]|$)'; then
+      printf 'exception in %s' "$target"
+      return
+    fi
+    if printf '%s\n' "$output" | grep -Eiq '(^|[^[:alnum:]_])(command failed|exited with code|killed: 9)([^[:alnum:]_]|$)'; then
+      printf 'process failed in %s' "$target"
+      return
+    fi
+  done < <(tmux list-panes -a -F '#S:#I.#P' 2>/dev/null | awk -F: -v s="$session" '$1 == s { print }')
+}
+
+session_health() {
+  local session="$1"
+
+  if ! is_session_running "$session"; then
+    printf 'stopped'
+    return
+  fi
+
+  if [[ -n "$(warning_reason "$session")" ]]; then
+    printf 'warning'
+    return
+  fi
+
+  printf 'running'
+}
+
+status_icon() {
+  local health="$1"
+  case "$health" in
+    running) printf '%s●%s' "$GREEN" "$RESET" ;;
+    warning) printf '%s●%s' "$YELLOW" "$RESET" ;;
+    *) printf '%s●%s' "$RED" "$RESET" ;;
+  esac
 }
 
 status_text() {
-  local session="$1"
-  if is_session_running "$session"; then
-    printf 'running'
-  else
-    printf 'stopped'
-  fi
+  local health="$1"
+  case "$health" in
+    running) printf 'running' ;;
+    warning) printf 'warning' ;;
+    *) printf 'stopped' ;;
+  esac
 }
 
 session_from_script() {
@@ -105,9 +191,9 @@ session_from_script() {
   local session
 
   session="$(
-    grep -E '^[[:space:]]*SESSION=' "$script" 2>/dev/null |
+    grep -E '^[[:space:]]*(SESSION|SESSION_NAME|TMUX_SESSION|TMUX_SESSION_NAME)=' "$script" 2>/dev/null |
       head -n 1 |
-      sed -E 's/^[[:space:]]*SESSION="\$\{[^:}]+:-([^}]+)\}".*/\1/; s/^[[:space:]]*SESSION="?([^"]+)"?.*/\1/' || true
+      sed -E 's/^[[:space:]]*[[:alnum:]_]+="\$\{[^:}]+:-([^}]+)\}".*/\1/; s/^[[:space:]]*[[:alnum:]_]+="?([^"]+)"?.*/\1/' || true
   )"
 
   if [[ -n "$session" && "$session" != *'$'* && "$session" != *'{'* ]]; then
@@ -189,30 +275,16 @@ select_session() {
 }
 
 list_scripts() {
-  local script session status icon
+  local script session health status icon detail
   discover_scripts | while IFS= read -r script; do
     session="$(session_from_script "$script")"
-    status="$(status_text "$session")"
-    icon="$(status_icon "$session")"
-    printf '%s %-8s %-24s %s\n' "$icon" "$status" "$session" "${script#$DEV_DIR/}"
+    health="$(session_health "$session")"
+    status="$(status_text "$health")"
+    icon="$(status_icon "$health")"
+    detail=""
+    [[ "$health" == "warning" ]] && detail="  ($(warning_reason "$session"))"
+    printf '%s %-8s %-24s %s%s\n' "$icon" "$status" "$session" "${script#$DEV_DIR/}" "$detail"
   done
-}
-
-list_picker_rows() {
-  local index=1
-  local script session status icon
-  discover_scripts | while IFS= read -r script; do
-    session="$(session_from_script "$script")"
-    status="$(status_text "$session")"
-    icon="$(status_icon "$session")"
-    printf '%2d) %s %-8s %-24s %s\n' "$index" "$icon" "$status" "$session" "${script#$DEV_DIR/}"
-    index=$((index + 1))
-  done
-}
-
-script_by_index() {
-  local index="$1"
-  discover_scripts | sed -n "${index}p"
 }
 
 read_key() {
@@ -225,28 +297,45 @@ read_key() {
   printf '%s' "$key"
 }
 
-pick_index() {
-  local title="$1"
-  local footer="$2"
-  shift 2
-  local rows=("$@")
+run_project_picker() {
+  local scripts=()
+  local base_rows=()
+  local git_rows=()
+  local warning_rows=()
   local selected=0
-  local key count
+  local key count script session health status icon rel_path warning_detail
 
-  count="${#rows[@]}"
-  (( count > 0 )) || return 1
+  while IFS= read -r script; do
+    scripts+=("$script")
+  done < <(discover_scripts)
+
+  ((${#scripts[@]} > 0)) || die "no tmux scripts found under $DEV_DIR"
+  count="${#scripts[@]}"
+
+  for script in "${scripts[@]}"; do
+    session="$(session_from_script "$script")"
+    health="$(session_health "$session")"
+    status="$(status_text "$health")"
+    icon="$(status_icon "$health")"
+    rel_path="${script#$DEV_DIR/}"
+    warning_detail=""
+    [[ "$health" == "warning" ]] && warning_detail="  ($(warning_reason "$session"))"
+    base_rows+=("$(printf '%s %-8s %-22s' "$icon" "$status" "$session")")
+    git_rows+=("$(git_summary "$script")")
+    warning_rows+=("$(printf '  %-34s%s' "${rel_path:0:34}" "$warning_detail")")
+  done
 
   while true; do
     clear >&2 2>/dev/null || true
-    printf '%s%s%s\n\n' "$BOLD" "$title" "$RESET" >&2
-    for i in "${!rows[@]}"; do
+    printf '%s◆ %sTmux%sManager%s  %sproject control%s\n\n' "$CYAN" "$BOLD" "$GREEN" "$CYAN" "$DIM" "$RESET" >&2
+    for i in "${!base_rows[@]}"; do
       if (( i == selected )); then
-        printf '%s❯ %s%s\n' "$REVERSE" "${rows[$i]}" "$RESET" >&2
+        printf '%s❯ %s %s%s%s\n' "$REVERSE" "${base_rows[$i]}" "${git_rows[$i]}" "${warning_rows[$i]}" "$RESET" >&2
       else
-        printf '  %s\n' "${rows[$i]}" >&2
+        printf '  %s %s%s\n' "${base_rows[$i]}" "${git_rows[$i]}" "${warning_rows[$i]}" >&2
       fi
     done
-    printf '\n%s%s%s\n' "$DIM" "$footer" "$RESET" >&2
+    printf '\n%s%s%s\n' "$DIM" "↑/↓ move  Enter start/open  s stop  r reload  g git  Esc quit" "$RESET" >&2
 
     key="$(read_key)"
     case "$key" in
@@ -261,85 +350,29 @@ pick_index() {
         selected=$(((selected + 1) % count))
         ;;
       "")
-        printf '%s\n' "$selected"
-        return 0
-        ;;
-      /)
-        printf '__grep_all__\n'
+        printf 'enter:%s\n' "$selected"
         return 0
         ;;
       r)
-        printf '__refresh__\n'
+        printf 'restart:%s\n' "$selected"
         return 0
         ;;
-      q|$'\e')
+      q)
+        ;;
+      s)
+        printf 'stop:%s\n' "$selected"
+        return 0
+        ;;
+      g)
+        for i in "${!scripts[@]}"; do
+          git_rows[$i]="$(git_summary "${scripts[$i]}")"
+        done
+        ;;
+      $'\e')
         return 1
         ;;
     esac
   done
-}
-
-pick_session_script() {
-  local scripts=()
-  local rows=()
-  local script session status icon selected
-
-  while IFS= read -r script; do
-    scripts+=("$script")
-  done < <(discover_scripts)
-
-  ((${#scripts[@]} > 0)) || die "no tmux scripts found under $DEV_DIR"
-
-  for script in "${scripts[@]}"; do
-    session="$(session_from_script "$script")"
-    status="$(status_text "$session")"
-    icon="$(status_icon "$session")"
-    rows+=("$(printf '%s %-8s %-24s %s' "$icon" "$status" "$session" "${script#$DEV_DIR/}")")
-  done
-
-  selected="$(pick_index "TmuxManager" "↑/↓ move  Enter select  / grep all  r refresh  q quit" "${rows[@]}")" || return 1
-  if [[ "$selected" == "__grep_all__" || "$selected" == "__refresh__" ]]; then
-    printf '%s\n' "$selected"
-    return 0
-  fi
-  printf '%s\n' "${scripts[$selected]}"
-}
-
-pick_action() {
-  local session="$1"
-  local actions=()
-  local rows=()
-  local selected action
-
-  actions=("grep" "logs" "attach")
-  if is_session_running "$session"; then
-    actions+=("stop" "restart")
-  else
-    actions+=("start")
-  fi
-  actions+=("back")
-
-  for action in "${actions[@]}"; do
-    case "$action" in
-      grep) rows+=("Grep this session") ;;
-      logs) rows+=("Show logs") ;;
-      attach) rows+=("Attach") ;;
-      stop) rows+=("${RED}Stop${RESET}") ;;
-      restart) rows+=("Restart") ;;
-      start) rows+=("${GREEN}Start${RESET}") ;;
-      back) rows+=("Back") ;;
-    esac
-  done
-
-  selected="$(pick_index "$session" "↑/↓ move  Enter select  q back" "${rows[@]}")" || {
-    printf 'back\n'
-    return 0
-  }
-  if [[ "$selected" == "__grep_all__" || "$selected" == "__refresh__" ]]; then
-    printf 'back\n'
-    return 0
-  fi
-  printf '%s\n' "${actions[$selected]}"
 }
 
 start_script() {
@@ -348,13 +381,38 @@ start_script() {
   "$script" --no-attach
 }
 
-open_session() {
+open_session_in_ghostty() {
   local session="$1"
   local attach_command
 
-  if [[ "${TMUX_MANAGER_GHOSTTY:-1}" != "0" && -d "$GHOSTTY_APP" ]]; then
-    printf -v attach_command 'tmux attach -t %q' "$session"
-    open -na "$GHOSTTY_APP" --args -e /bin/zsh -lc "$attach_command"
+  if [[ ! -d "$GHOSTTY_APP" ]]; then
+    echo "Ghostty app not found: $GHOSTTY_APP"
+    return 1
+  fi
+
+  printf -v attach_command 'tmux attach -t %q' "$session"
+  open -na "$GHOSTTY_APP" --args -e /bin/zsh -lc "$attach_command" >/dev/null 2>&1
+}
+
+open_script_in_ghostty() {
+  local script="$1"
+  local script_command
+
+  if [[ ! -d "$GHOSTTY_APP" ]]; then
+    echo "Ghostty app not found: $GHOSTTY_APP"
+    return 1
+  fi
+
+  [[ -x "$script" ]] || chmod +x "$script"
+  printf -v script_command '%q' "$script"
+  open -na "$GHOSTTY_APP" --args -e /bin/zsh -lc "$script_command" >/dev/null 2>&1
+}
+
+open_session() {
+  local session="$1"
+
+  if [[ "${TMUX_MANAGER_GHOSTTY:-1}" != "0" ]]; then
+    open_session_in_ghostty "$session"
     return
   fi
 
@@ -365,6 +423,16 @@ start_script_and_open() {
   local script="$1"
   local session
   session="$(session_from_script "$script")"
+  if is_session_running "$session"; then
+    open_session "$session"
+    return
+  fi
+
+  if [[ "${TMUX_MANAGER_GHOSTTY:-1}" != "0" ]]; then
+    open_script_in_ghostty "$script"
+    return
+  fi
+
   start_script "$script"
   open_session "$session"
 }
@@ -435,66 +503,31 @@ interactive() {
   need_cmd tmux
 
   while true; do
-    local script session action pattern key
+    local selection action index script session
 
-    script="$(pick_session_script)" || exit 0
-    if [[ "$script" == "__refresh__" ]]; then
-      continue
-    fi
-
-    if [[ "$script" == "__grep_all__" ]]; then
-      clear 2>/dev/null || true
-      printf '%sGrep all sessions%s\n\n' "$BOLD" "$RESET"
-      printf 'pattern> '
-      read -r pattern
-      grep_sessions "$pattern" || true
-      printf '\npress enter to continue> '
-      read -r _
-      continue
-    fi
+    selection="$(run_project_picker)" || exit 0
+    action="${selection%%:*}"
+    index="${selection#*:}"
+    script="$(discover_scripts | sed -n "$((index + 1))p")"
+    [[ -n "$script" ]] || continue
 
     session="$(session_from_script "$script")"
-    action="$(pick_action "$session")"
 
     case "$action" in
-      grep)
-        clear 2>/dev/null || true
-        printf '%sGrep %s%s\n\n' "$BOLD" "$session" "$RESET"
-        printf 'pattern> '
-        read -r pattern
-        grep_session "$session" "$pattern" || true
-        printf '\npress enter to continue> '
-        read -r _
-        ;;
-      logs)
-        clear 2>/dev/null || true
-        capture_session "$session"
-        printf '\npress enter to continue> '
-        read -r _
-        ;;
-      attach)
-        open_session "$session"
+      enter)
+        if is_session_running "$session"; then
+          open_session_in_ghostty "$session" || sleep 1
+        else
+          open_script_in_ghostty "$script" || sleep 1
+        fi
         ;;
       stop)
-        clear 2>/dev/null || true
         stop_session "$session"
-        printf '\npress enter to continue> '
-        read -r _
         ;;
       restart)
-        clear 2>/dev/null || true
-        restart_script "$script"
-        open_session "$session"
-        printf '\npress enter to continue> '
-        read -r _
+        stop_session "$session"
+        open_script_in_ghostty "$script" || sleep 1
         ;;
-      start)
-        clear 2>/dev/null || true
-        start_script_and_open "$script"
-        printf '\npress enter to continue> '
-        read -r _
-        ;;
-      back) ;;
     esac
   done
 }

@@ -1,10 +1,10 @@
 # TmuxManager
 
-TmuxManager is an interactive CLI for finding and inspecting tmux project scripts under `~/dev`.
+TmuxManager is an interactive CLI for finding tmux project scripts under `~/dev`.
 
-It recursively scans the dev folder for tmux-related scripts, shows whether their inferred session is running, and lets you select one to grep captured pane output, show logs, attach, start, stop, or restart.
+It recursively scans the dev folder for tmux-related scripts, shows whether their inferred session is running, shows git branch plus line additions/removals and untracked counts, and lets you start/open, stop, or reload it from the main screen. Press `g` to refresh git data.
 
-Starting, restarting, or attaching opens the tmux session in a new Ghostty window by default.
+Opening or starting a project happens in a new Ghostty window by default, leaving TmuxManager open.
 
 ## Install
 
@@ -36,7 +36,7 @@ Add that alias to `~/.zshrc` to launch the manager with `q`.
 ./tmuxmanager grep "error"
 ```
 
-The default interactive view is an arrow-key picker. Running sessions show a green dot; stopped sessions show a red dot.
+The default interactive view is an arrow-key picker. Running sessions show a green dot; stopped sessions show a red dot. Sessions that are running but have recent failure-looking pane output show a yellow warning state.
 
 ```text
 TmuxManager
@@ -44,7 +44,7 @@ TmuxManager
 ❯ ● running  budget-dev       Budget/tmux-dev.sh
   ● stopped  sidequest-dev    SideQuest/tmux-dev.sh
 
-↑/↓ move  Enter select  / grep all  r refresh  q quit
+↑/↓ move  Enter start/open  s stop  r reload  g git  Esc quit
 ```
 
 Set a different scan root with:
@@ -61,6 +61,6 @@ TMUX_MANAGER_GHOSTTY=0 ./tmuxmanager
 
 ## Session Detection
 
-TmuxManager reads common `SESSION=...` assignments from each script. If it cannot infer a session name, it falls back to `<project-folder>-dev`.
+TmuxManager reads common `SESSION=...`, `SESSION_NAME=...`, `TMUX_SESSION=...`, and `TMUX_SESSION_NAME=...` assignments from each script. If it cannot infer a session name, it falls back to `<project-folder>-dev`.
 
 Scripts that support `--no-attach` work best because TmuxManager can start them without taking over the terminal.
