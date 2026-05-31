@@ -46,6 +46,7 @@ Usage:
   tmuxmanager stop [query]    Stop the inferred or selected session
   tmuxmanager restart [query] Restart the inferred or selected session
   tmuxmanager attach [query]  Attach to a running session
+  tmuxmanager preview [query] Open the configured preview URL
   tmuxmanager logs [query]    Show captured pane output for a session
   tmuxmanager grep PATTERN    Search captured pane output across sessions
   tmuxmanager edit [query]    Open a discovered script in $EDITOR
@@ -87,6 +88,119 @@ script_label() {
 project_dir_from_script() {
   local script="$1"
   dirname "$script"
+}
+
+config_path_for_script() {
+  local script="$1"
+  printf '%s/tmuxmanager.json' "$(project_dir_from_script "$script")"
+}
+
+project_config_json() {
+  local script="$1"
+  local config_path
+  config_path="$(config_path_for_script "$script")"
+  [[ -f "$config_path" ]] || return 1
+  printf '%s\n' "$config_path"
+}
+
+config_value() {
+  local script="$1"
+  local key="$2"
+  local config_path
+
+  config_path="$(project_config_json "$script")" || return 1
+  command -v python3 >/dev/null 2>&1 || return 1
+
+  python3 - "$config_path" "$key" <<'PY'
+import json
+import sys
+
+path, key = sys.argv[1], sys.argv[2]
+try:
+    with open(path, encoding="utf-8") as handle:
+        data = json.load(handle)
+except Exception:
+    sys.exit(1)
+
+value = data
+for part in key.split("."):
+    if isinstance(value, dict) and part in value:
+        value = value[part]
+    else:
+        sys.exit(1)
+
+if value is None or isinstance(value, (dict, list)):
+    sys.exit(1)
+
+print(value)
+PY
+}
+
+config_port() {
+  local script="$1"
+  local service="$2"
+
+  config_value "$script" "ports.$service" 2>/dev/null ||
+    config_value "$script" "$service.port" 2>/dev/null ||
+    config_value "$script" "$service" 2>/dev/null ||
+    true
+}
+
+port_badges() {
+  local script="$1"
+  local storybook frontend backend badges
+
+  storybook="$(config_port "$script" "storybook")"
+  frontend="$(config_port "$script" "frontend")"
+  backend="$(config_port "$script" "backend")"
+
+  badges=""
+  [[ -n "$storybook" ]] && badges+=" sb:$storybook"
+  [[ -n "$frontend" ]] && badges+=" fe:$frontend"
+  [[ -n "$backend" ]] && badges+=" be:$backend"
+
+  printf '%-28s' "${badges:0:28}"
+}
+
+script_port_args() {
+  local script="$1"
+  local storybook frontend backend args=()
+
+  storybook="$(config_port "$script" "storybook")"
+  frontend="$(config_port "$script" "frontend")"
+  backend="$(config_port "$script" "backend")"
+
+  [[ -n "$storybook" ]] && args+=(--storybook-port "$storybook")
+  [[ -n "$frontend" ]] && args+=(--frontend-port "$frontend")
+  [[ -n "$backend" ]] && args+=(--backend-port "$backend")
+
+  ((${#args[@]} > 0)) || return 0
+  printf '%q ' "${args[@]}"
+}
+
+preview_url_for_script() {
+  local script="$1"
+  local preview service port
+
+  preview="$(config_value "$script" "preview" 2>/dev/null || true)"
+  if [[ "$preview" == http://* || "$preview" == https://* ]]; then
+    printf '%s\n' "$preview"
+    return
+  fi
+
+  service="${preview:-frontend}"
+  port="$(config_port "$script" "$service")"
+  if [[ -z "$port" && "$service" != "storybook" ]]; then
+    service="storybook"
+    port="$(config_port "$script" "$service")"
+  fi
+  if [[ -z "$port" && "$service" != "backend" ]]; then
+    service="backend"
+    port="$(config_port "$script" "$service")"
+  fi
+
+  [[ -n "$port" ]] || return 1
+  printf 'http://localhost:%s\n' "$port"
 }
 
 git_summary() {
@@ -275,15 +389,16 @@ select_session() {
 }
 
 list_scripts() {
-  local script session health status icon detail
+  local script session health status icon detail badges
   discover_scripts | while IFS= read -r script; do
     session="$(session_from_script "$script")"
     health="$(session_health "$session")"
     status="$(status_text "$health")"
     icon="$(status_icon "$health")"
+    badges="$(port_badges "$script")"
     detail=""
     [[ "$health" == "warning" ]] && detail="  ($(warning_reason "$session"))"
-    printf '%s %-8s %-24s %s%s\n' "$icon" "$status" "$session" "${script#$DEV_DIR/}" "$detail"
+    printf '%s %-8s %-24s %s %s%s\n' "$icon" "$status" "$session" "$badges" "${script#$DEV_DIR/}" "$detail"
   done
 }
 
@@ -300,6 +415,7 @@ read_key() {
 run_project_picker() {
   local scripts=()
   local base_rows=()
+  local port_rows=()
   local git_rows=()
   local warning_rows=()
   local selected=0
@@ -321,6 +437,7 @@ run_project_picker() {
     warning_detail=""
     [[ "$health" == "warning" ]] && warning_detail="  ($(warning_reason "$session"))"
     base_rows+=("$(printf '%s %-8s %-22s' "$icon" "$status" "$session")")
+    port_rows+=("$(port_badges "$script")")
     git_rows+=("$(git_summary "$script")")
     warning_rows+=("$(printf '  %-34s%s' "${rel_path:0:34}" "$warning_detail")")
   done
@@ -330,12 +447,19 @@ run_project_picker() {
     printf '%s◆ %sTmux%sManager%s  %sproject control%s\n\n' "$CYAN" "$BOLD" "$GREEN" "$CYAN" "$DIM" "$RESET" >&2
     for i in "${!base_rows[@]}"; do
       if (( i == selected )); then
-        printf '%s❯ %s %s%s%s\n' "$REVERSE" "${base_rows[$i]}" "${git_rows[$i]}" "${warning_rows[$i]}" "$RESET" >&2
+        printf '%s❯ %s %s %s%s%s\n' "$REVERSE" "${base_rows[$i]}" "${port_rows[$i]}" "${git_rows[$i]}" "${warning_rows[$i]}" "$RESET" >&2
       else
-        printf '  %s %s%s\n' "${base_rows[$i]}" "${git_rows[$i]}" "${warning_rows[$i]}" >&2
+        printf '  %s %s %s%s\n' "${base_rows[$i]}" "${port_rows[$i]}" "${git_rows[$i]}" "${warning_rows[$i]}" >&2
       fi
     done
-    printf '\n%s%s%s\n' "$DIM" "↑/↓ move  Enter start/open  s stop  r reload  g git  Esc quit" "$RESET" >&2
+    printf '\n%sControls%s\n' "$BOLD" "$RESET" >&2
+    printf '  %s%s%s       %s\n' "$CYAN" "↑/↓" "$RESET" "move selection" >&2
+    printf '  %s%-9s%s %s\n' "$GREEN" "Enter" "$RESET" "start or open selected project" >&2
+    printf '  %s%-9s%s %s\n' "$RED" "s" "$RESET" "stop selected session" >&2
+    printf '  %s%-9s%s %s\n' "$YELLOW" "r" "$RESET" "reload selected session" >&2
+    printf '  %s%-9s%s %s\n' "$CYAN" "p" "$RESET" "open configured preview" >&2
+    printf '  %s%-9s%s %s\n' "$CYAN" "g" "$RESET" "refresh git status" >&2
+    printf '  %s%-9s%s %s\n' "$DIM" "Esc" "$RESET" "quit" >&2
 
     key="$(read_key)"
     case "$key" in
@@ -355,6 +479,10 @@ run_project_picker() {
         ;;
       r)
         printf 'restart:%s\n' "$selected"
+        return 0
+        ;;
+      p)
+        printf 'preview:%s\n' "$selected"
         return 0
         ;;
       q)
@@ -377,14 +505,23 @@ run_project_picker() {
 
 start_script() {
   local script="$1"
+  local args
   [[ -x "$script" ]] || chmod +x "$script"
-  "$script" --no-attach
+  args="$(script_port_args "$script")"
+  # shellcheck disable=SC2086
+  "$script" --no-attach $args
+}
+
+ghostty_is_running() {
+  pgrep -x ghostty >/dev/null 2>&1 && return 0
+  pgrep -x Ghostty >/dev/null 2>&1 && return 0
+  osascript -e 'tell application "System Events" to exists process "Ghostty"' 2>/dev/null | grep -q true
 }
 
 focus_ghostty_tab() {
   local tab_title="$1"
 
-  pgrep -x ghostty >/dev/null 2>&1 || return 1
+  ghostty_is_running || return 1
 
   osascript - "$tab_title" <<'APPLESCRIPT'
 on run argv
@@ -422,7 +559,7 @@ open_command_in_ghostty() {
 
   printf -v titled_command 'printf "\\033]0;%s\\007"; exec /bin/zsh -lc %q' "$tab_title" "$command"
 
-  if ! pgrep -x ghostty >/dev/null 2>&1; then
+  if ! ghostty_is_running; then
     open -na "$GHOSTTY_APP" --args -e /bin/zsh -lc "$titled_command" >/dev/null 2>&1
     return
   fi
@@ -464,11 +601,12 @@ open_session_in_ghostty() {
 open_script_in_ghostty() {
   local script="$1"
   local session
-  local script_command
+  local script_command args
 
   session="$(session_from_script "$script")"
   [[ -x "$script" ]] || chmod +x "$script"
-  printf -v script_command '%q' "$script"
+  args="$(script_port_args "$script")"
+  printf -v script_command '%q --no-attach %s' "$script" "$args"
   if focus_ghostty_tab "$session" >/dev/null 2>&1; then
     return
   fi
@@ -477,6 +615,14 @@ open_script_in_ghostty() {
   fi
 
   open_command_in_ghostty "$session" "$script_command"
+}
+
+open_preview() {
+  local script="$1"
+  local url
+
+  url="$(preview_url_for_script "$script")" || die "no preview port configured for $(basename "$(project_dir_from_script "$script")")"
+  open "$url"
 }
 
 open_session() {
@@ -599,6 +745,9 @@ interactive() {
         stop_session "$session"
         open_script_in_ghostty "$script" || sleep 1
         ;;
+      preview)
+        open_preview "$script" || sleep 1
+        ;;
     esac
   done
 }
@@ -640,6 +789,10 @@ main() {
     attach)
       need_cmd tmux
       open_session "$(select_session "${2:-}")"
+      ;;
+    preview)
+      script="$(select_script "${2:-}")"
+      open_preview "$script"
       ;;
     logs)
       need_cmd tmux

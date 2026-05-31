@@ -32,19 +32,27 @@ Add that alias to `~/.zshrc` to launch the manager with `q`.
 ./tmuxmanager stop budget
 ./tmuxmanager restart sidequest
 ./tmuxmanager attach budget
+./tmuxmanager preview budget
 ./tmuxmanager logs budget
 ./tmuxmanager grep "error"
 ```
 
-The default interactive view is an arrow-key picker. Running sessions show a green dot; stopped sessions show a red dot. Sessions that are running but have recent failure-looking pane output show a yellow warning state.
+The default interactive view is an arrow-key picker. Running sessions show a green dot; stopped sessions show a red dot. Sessions that are running but have recent failure-looking pane output show a yellow warning state. Projects with `tmuxmanager.json` port settings show Storybook, frontend, and backend port badges.
 
 ```text
 TmuxManager
 
-❯ ● running  budget-dev       Budget/tmux-dev.sh
-  ● stopped  sidequest-dev    SideQuest/tmux-dev.sh
+❯ ● running  budget-dev       fe:5173 be:5050           Budget/tmux-dev.sh
+  ● stopped  sidequest-dev    sb:6006 fe:3000 be:5000   SideQuest/tmux-dev.sh
 
-↑/↓ move  Enter start/open  s stop  r reload  g git  Esc quit
+Controls
+  ↑/↓       move selection
+  Enter     start or open selected project
+  s         stop selected session
+  r         reload selected session
+  p         open configured preview
+  g         refresh git status
+  Esc       quit
 ```
 
 Set a different scan root with:
@@ -64,3 +72,28 @@ TMUX_MANAGER_GHOSTTY=0 ./tmuxmanager
 TmuxManager reads common `SESSION=...`, `SESSION_NAME=...`, `TMUX_SESSION=...`, and `TMUX_SESSION_NAME=...` assignments from each script. If it cannot infer a session name, it falls back to `<project-folder>-dev`.
 
 Scripts that support `--no-attach` work best because TmuxManager can start them without taking over the terminal.
+
+## Project Port Config
+
+Add `tmuxmanager.json` next to a project's tmux script to customize displayed ports and preview behavior:
+
+```json
+{
+  "ports": {
+    "storybook": 6006,
+    "frontend": 5173,
+    "backend": 5050
+  },
+  "preview": "frontend"
+}
+```
+
+`preview` can be `frontend`, `storybook`, `backend`, or a full URL. Press `p` in the interactive picker, or run `./tmuxmanager preview <project>`, to open the selected preview.
+
+When TmuxManager starts a project, it passes configured ports to the tmux script as CLI arguments:
+
+```bash
+./tmux-dev.sh --no-attach --storybook-port 6006 --frontend-port 5173 --backend-port 5050
+```
+
+The tmux script should use those arguments to start React, Storybook, .NET, or other services with the desired ports.
